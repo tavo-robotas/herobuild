@@ -1,0 +1,32 @@
+[package]
+name = "herobuild"
+version = "0.1.0"
+edition = "2021"
+authors = ["Aurimas Blažulionis <0x60@pm.me>"]
+license = "MIT"
+keywords = [ "ros", "catkin", "bloom", "robots", "build", "farm" ]
+categories = [ "command-line-utilities", "development-tools" ]
+readme = "README.md"
+repository = "https://github.com/tavo-robotas/herobuild"
+description = "Lightweight ROS build farm, based on webhooks"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+walkdir = "2"
+anyhow = "1"
+clap = { version = "3", features = ["cargo"] }
+rayon = "1"
+log = "0.4"
+env_logger = "0.9"
+indicatif = "0.16"
+bollard = "0.13"
+toml = "0.5"
+sha256 = "1"
+git2 = "0.14"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-std = { version = "1", features = ["tokio1", "unstable"] }
+smol = "1"
