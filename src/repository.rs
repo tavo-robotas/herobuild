@@ -518,7 +518,7 @@ impl RepositoryCache {
             });
 
             let host_config = Some(HostConfig {
-                binds: Some(mounts.iter().map(|(d, s)| format!("{s}:{d}")).collect()),
+                binds: Some(mounts.iter().map(|(d, s)| format!("{s}:{d}:Z")).collect()),
                 ..Default::default()
             });
 
