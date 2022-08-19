@@ -1,13 +1,7 @@
-
-use futures::future::join_all;
-use std::collections::{BTreeSet, HashMap};
-use tokio_stream::StreamExt;
+use crate::hb_state::*;
+use crate::wait_flag::*;
 use anyhow::{anyhow, Result};
 use async_std::sync::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
-use log::*;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use bollard::{
     container::{
         self, CreateContainerOptions, KillContainerOptions, StartContainerOptions,
@@ -16,16 +10,21 @@ use bollard::{
     models::{HostConfig, MountPoint},
     Docker,
 };
+use futures::future::join_all;
+use log::*;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
-use crate::wait_flag::*;
-use crate::hb_state::*;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use tokio_stream::StreamExt;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SshKey {
     publickey: Option<PathBuf>,
     privatekey: Option<PathBuf>,
-    passphrase: Option<String>
+    passphrase: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34,7 +33,7 @@ struct GitDeployment {
     branch: Option<String>,
     pre_checkout: Option<String>,
     post_checkout: Option<String>,
-    key: Option<SshKey>
+    key: Option<SshKey>,
 }
 
 impl GitDeployment {
@@ -390,9 +389,16 @@ impl RepositoryCache {
         repo: &Repository,
         repos: &HashMap<String, impl AsRef<Repository>>,
         transient_deps: &HashMap<String, BTreeSet<String>>,
-        tags: &[&str],
+        tags: &[(&str, &str, String, String)],
     ) -> Result<bool> {
-        let mut tags = tags.iter().copied().collect::<BTreeSet<_>>();
+        let mut tags = tags
+            .iter()
+            .cloned()
+            .map(|(p, t, combo, id)| (id, (p, t, combo)))
+            .collect::<BTreeMap<_, _>>();
+
+        println!("{tags:?}");
+
         let mut to_remove = vec![];
         let cmd = repo.cmd(transient_deps);
 
@@ -436,39 +442,54 @@ impl RepositoryCache {
         }
 
         for (k, v) in &mut self.docker_containers {
-            let mounts = repo.mounts(k, repos, transient_deps);
+            let cont = docker.inspect_container(v, None).await;
 
-            let insp = docker.inspect_container(v, None).await;
+            if let Ok(cont) = cont {
+                let image = cont.image.clone().unwrap_or_default();
 
-            match insp {
-                Ok(insp)
-                    if tags.contains(k.as_str())
-                        && mounts_match(&mounts, insp.mounts.as_ref())
-                        && insp.config.as_ref().and_then(|c| c.cmd.as_ref()) == Some(&cmd)
+                let (platform_match, mounts_match) = if let Some((_, tag, combo)) = tags.get(&image)
+                {
+                    (
+                        k.contains(combo),
+                        mounts_match(
+                            &repo.mounts(tag, repos, transient_deps),
+                            cont.mounts.as_ref(),
+                        ),
+                    )
+                } else {
+                    (false, false)
+                };
+
+                match cont {
+                    cont if !image.is_empty()
+                        && platform_match
+                        && mounts_match
+                        && cont.config.as_ref().and_then(|c| c.cmd.as_ref()) == Some(&cmd)
                         && env_match(
                             repo.env.as_ref(),
-                            insp.config.as_ref().and_then(|c| c.env.as_ref()),
+                            cont.config.as_ref().and_then(|c| c.env.as_ref()),
                         ) =>
-                {
-                    tags.remove(k.as_str());
+                    {
+                        tags.remove(&image);
+                    }
+                    cont => {
+                        println!(
+                            "{:?} {:?} {} {} {} {}",
+                            image,
+                            tags.get(&image),
+                            platform_match,
+                            mounts_match,
+                            cont.config.as_ref().and_then(|c| c.cmd.as_ref()) == Some(&cmd),
+                            env_match(
+                                repo.env.as_ref(),
+                                cont.config.as_ref().and_then(|c| c.env.as_ref()),
+                            )
+                        );
+                        to_remove.push((k.clone(), v.clone()));
+                    }
                 }
-                Ok(insp) => {
-                    println!("{}", repo.name);
-                    println!(
-                        "{} {} {} {}",
-                        tags.contains(k.as_str()),
-                        mounts_match(&mounts, insp.mounts.as_ref()),
-                        insp.config.as_ref().and_then(|c| c.cmd.as_ref()) == Some(&cmd),
-                        env_match(
-                            repo.env.as_ref(),
-                            insp.config.as_ref().and_then(|c| c.env.as_ref()),
-                        )
-                    );
-                    to_remove.push((k.clone(), v.clone()));
-                }
-                _ => {
-                    println!("ALT ROUTE {}", repo.name);
-                }
+            } else {
+                println!("ALT ROUTE {}", repo.name);
             }
         }
 
@@ -487,13 +508,13 @@ impl RepositoryCache {
             }
         }
 
-        for tag in tags {
-            let mounts = repo.mounts(tag, repos, transient_deps);
+        for (id, (_, tag, combo)) in tags {
+            let mounts = repo.mounts(&tag, repos, transient_deps);
 
             changed = true;
 
             let options = Some(CreateContainerOptions {
-                name: format!("herobuild-{}-{tag}", repo.name),
+                name: format!("herobuild-{}-{combo}", repo.name),
             });
 
             let host_config = Some(HostConfig {
@@ -502,16 +523,20 @@ impl RepositoryCache {
             });
 
             let config = container::Config {
-                image: Some(format!("docker.io/tavo-robotas/catkin-bloom:{tag}")),
+                image: Some(id),
                 host_config,
                 cmd: Some(cmd.clone()),
                 env: repo.env.clone(),
                 ..Default::default()
             };
 
+            println!("HI");
+
             let cont = docker.create_container(options, config).await?;
 
-            self.docker_containers.insert(tag.to_string(), cont.id);
+            println!("HI2");
+
+            self.docker_containers.insert(combo, cont.id);
         }
 
         Ok(changed)

@@ -1,4 +1,3 @@
-
 use async_std::sync::{Condvar, Mutex};
 
 #[derive(Default, Debug)]
@@ -37,4 +36,3 @@ impl<T: Copy + Eq> WaitFlag<T> {
             .await;
     }
 }
-

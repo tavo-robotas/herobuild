@@ -6,13 +6,17 @@ use std::ffi::OsStr;
 use std::fs;
 use std::sync::Arc;
 
+mod hb_state;
 mod repository;
 mod wait_flag;
-mod hb_state;
 
+use hb_state::*;
 use repository::*;
 use wait_flag::*;
-use hb_state::*;
+
+use bollard::image::{CreateImageOptions, TagImageOptions};
+use log::*;
+use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,6 +25,7 @@ async fn main() -> Result<()> {
     let defs = "herobuild";
 
     let tags = &["melodic-bionic"];
+    let platforms = &["linux/arm64", "linux/amd64"];
 
     println!("READ ALL");
 
@@ -41,6 +46,15 @@ async fn main() -> Result<()> {
 
     let docker = Arc::new(Docker::connect_with_local_defaults()?);
 
+    let mut ids = vec![];
+
+    for plat in platforms {
+        for tag in tags {
+            let (combo, id) = pull_image(&docker, plat, tag).await?;
+            ids.push((*plat, *tag, combo, id));
+        }
+    }
+
     join_all(state.repos.values().map(|r| async {
         r.cache
             .write()
@@ -50,7 +64,7 @@ async fn main() -> Result<()> {
                 &r.repo,
                 &state.repos,
                 &state.transient_dependencies,
-                tags,
+                &ids,
             )
             .await
             .unwrap();
@@ -161,3 +175,65 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn pull_image(docker: &Docker, plat: &str, tag: &str) -> Result<(String, String)> {
+    let combo = plat.replace("/", "-") + "-" + tag;
+    let dl_repo = "docker.io/tavorobotas/catkin-bloom";
+    let repo = "hbcache/catkin-bloom";
+
+    let image_tag = format!("{dl_repo}:{tag}");
+    let cached_image = format!("{repo}:{combo}");
+
+    loop {
+        // Check if cached image exists
+        if let Ok(image) = docker.inspect_image(&cached_image).await {
+            // Check if architecture matches
+            if image
+                .os
+                .zip(image.architecture)
+                .map(|(a, b)| format!("{a}/{b}"))
+                .as_deref()
+                == Some(plat)
+            {
+                if let Some(id) = image.id {
+                    return Ok((combo, id));
+                }
+            }
+        }
+
+        // If not, pull a new image
+
+        info!("Pulling {tag} plat {plat} as {combo}");
+
+        let ret = docker
+            .create_image(
+                Some(CreateImageOptions {
+                    from_image: image_tag.as_str(),
+                    platform: plat,
+                    ..Default::default()
+                }),
+                None,
+                None,
+            )
+            .collect::<Vec<_>>()
+            .await;
+
+        println!("{ret:?}");
+
+        // Tag the image if correct platform combo is provided
+        if let Ok(image) = docker.inspect_image(&image_tag).await {
+            let this_plt = image
+                .os
+                .zip(image.architecture)
+                .map(|(a, b)| format!("{a}/{b}"));
+
+            if this_plt.as_deref() == Some(plat) {
+                if let Some(id) = image.id {
+                    println!("TAGGING {id} as {repo}:{combo}");
+                    docker
+                        .tag_image(&id, Some(TagImageOptions { repo, tag: &combo }))
+                        .await?;
+                }
+            }
+        }
+    }
+}

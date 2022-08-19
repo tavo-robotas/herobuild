@@ -1,7 +1,6 @@
-
-use std::collections::{BTreeSet, HashMap};
 use crate::repository::*;
 use crate::wait_flag::*;
+use std::collections::{BTreeSet, HashMap};
 
 pub struct HbState {
     pub repos: HashMap<String, RepositoryState>,
@@ -88,5 +87,3 @@ fn inverse_depmap(depmap: &HashMap<String, BTreeSet<String>>) -> HashMap<String,
 
     ret
 }*/
-
-
